@@ -1,0 +1,6 @@
+[2025-11-06 05:27:31] [INFO] Starting Fireconx scan
+[2025-11-06 05:27:31] [INFO] Target: https://black-production.firebaseio.com
+[2025-11-06 05:27:31] [INFO] Safe mode: true
+[2025-11-06 05:27:31] [INFO] Starting Firebase Database Security Tests (safe=true)
+[2025-11-06 05:27:31] [INFO] Safe mode: write tests skipped.
+[2025-11-06 05:27:31] [INFO] Testing: //black-production.firebaseio.com/.json::::Root database access

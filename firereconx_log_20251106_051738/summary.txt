@@ -1,0 +1,28 @@
+MOBILE PENTEST SUMMARY
+======================
+Date: Thu Nov  6 05:18:28 WIB 2025
+Target: https://black-production.firebaseio.com
+
+VULNERABILITY SUMMARY
+====================
+Total Vulnerabilities: 7
+Firebase Issues: 0
+API Key Issues: 7
+
+DETAILED FINDINGS
+=================
+180:[0;31m[2025-11-06 05:17:53] [VULN] API Key might be usable with: maps.googleapis.com (HTTP 404)[0m
+181:[0;31m[2025-11-06 05:17:53] [VULN] API Key might be usable with: places.googleapis.com (HTTP 404)[0m
+182:[0;31m[2025-11-06 05:17:53] [VULN] API Key might be usable with: geolocation.googleapis.com (HTTP 404)[0m
+183:[0;31m[2025-11-06 05:17:53] [VULN] API Key might be usable with: vision.googleapis.com (HTTP 404)[0m
+184:[0;31m[2025-11-06 05:17:54] [VULN] API Key might be usable with: language.googleapis.com (HTTP 404)[0m
+185:[0;31m[2025-11-06 05:17:54] [VULN] API Key might be usable with: translation.googleapis.com (HTTP 404)[0m
+186:[0;31m[2025-11-06 05:17:54] [VULN] API Key might be usable with: identitytoolkit.googleapis.com (HTTP 404)[0m
+
+SECURITY RECOMMENDATIONS
+========================
+1. Implement Firebase Security Rules
+2. Restrict API Keys to specific services & domains
+3. Use App Check for additional protection
+4. Implement proper authentication
+5. Regular security audits
