@@ -3,7 +3,7 @@
 **FireconX** is an all-in-one mobile pentest helper.
 It checks Firebase security rules and Google API key restrictions for Android/iOS apps.
 
-> **Note:** You can often discover a project's Firebase Realtime Database URL and Google API key by analyzing the app (APK / IPA) with **Mobile Security Framework (MobSF)**. Use MobSF static analysis to inspect hardcoded strings, configuration files, and reconnaissance sections — it can quickly point you to Firebase endpoints and API keys to test with FireconX.
+> **Note:** You can often discover a project's Firebase Realtime Database URL and Google API key by analyzing the app (APK / IPA) with **[Mobile Security Framework (MobSF)](https://github.com/MobSF/Mobile-Security-Framework-MobSF)**. Use MobSF static analysis to inspect hardcoded strings, configuration files, and reconnaissance sections — it can quickly point you to Firebase endpoints and API keys to test with FireconX.
 
 ![firebase url](https://github.com/hangga/FireconX/blob/main/firebase_analysis.png?raw=true)
 ![google api](https://github.com/hangga/FireconX/blob/main/google_api_key.png?raw=true)
