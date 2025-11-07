@@ -1,4 +1,4 @@
-# FireConX — Mobile Firebase recon + API-key usability scanner
+# 🔥 FireConX — Mobile Firebase recon + API-key usability scanner
 
 **FireConX** is a lightweight Bash tool to perform quick security checks against Firebase Realtime Database, Firebase Storage and Google Maps/Google APIs. It focuses on *unauthenticated/public exposure* checks (pentest mode) and will not attempt to log in to targets.
 
