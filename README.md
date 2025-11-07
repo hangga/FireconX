@@ -1,163 +1,123 @@
-# 🔥 FireconX — How to Use
+# FireConX — Mobile Firebase recon + API-key usability scanner
 
-**FireconX** is an all-in-one mobile pentest helper.
-It checks Firebase security rules and Google API key restrictions for Android/iOS apps.
+**FireConX** is a lightweight Bash tool to perform quick security checks against Firebase Realtime Database, Firebase Storage and Google Maps/Google APIs. It focuses on *unauthenticated/public exposure* checks (pentest mode) and will not attempt to log in to targets.
 
-> **Note:** You can often discover a project's Firebase Realtime Database URL and Google API key by analyzing the app (APK / IPA) with **[Mobile Security Framework (MobSF)](https://github.com/MobSF/Mobile-Security-Framework-MobSF)**. Use MobSF static analysis to inspect hardcoded strings, configuration files, and reconnaissance sections — it can quickly point you to Firebase endpoints and API keys to test with FireconX.
-
-![firebase url](https://github.com/hangga/FireconX/blob/main/firebase_analysis.png?raw=true)
-![google api](https://github.com/hangga/FireconX/blob/main/google_api_key.png?raw=true)
+> ⚠️ **Important:** Run this tool only against targets you own or have explicit permission to test. Unauthorized scanning or write attempts can be illegal.
 
 ---
 
-## 🧩 Requirements
+## Features
 
-* Linux or macOS terminal with **bash**
-* **curl** installed
-* You must have:
-
-  * A **Firebase Realtime Database URL**, e.g. `https://myapp.firebaseio.com`
-  * A **Google API key**, e.g. `AIzaSyABC123def456`
-* **Authorization** to test the target (never test without permission)
+* Normalize and validate Firebase URLs (`https://...`) automatically
+* Test common database paths (root, users, messages, orders)
+* Test write permissions using safe PUT/POST probes (can be disabled)
+* Test Firebase Storage bucket accessibility
+* Test Google Maps API endpoints and inspect response body for API errors (e.g. `REQUEST_DENIED`)
+* Check basic API key restrictions for several Google services
+* Colorized terminal output + saved logfile and summary in output directory
+* Saves problematic Google API responses to JSON files for later inspection
 
 ---
 
-## 🚀 Quick Examples
+## Requirements
 
-Basic usage:
+* `bash` (GNU bash)
+* `curl` (with TLS support)
+* Unix-like OS (Linux, macOS)
+
+---
+
+## Installation
+
+No installation is required. Make the shipped script executable:
 
 ```bash
-./fireconx.sh https://myapp.firebaseio.com AIzaSyABC123def456
+chmod +x fireconx.sh
 ```
 
-With options:
+Then run it as described below.
+
+---
+
+## Usage
+
+```
+./fireconx.sh --url <firebase_url> [--key <google_api_key>]
+```
+
+### Examples
+
+* Basic Firebase-only scan (scheme optional):
 
 ```bash
-./fireconx.sh --url https://myapp.firebaseio.com --key AIzaSyABC123def456
+./fireconx.sh --url your-project.firebaseio.com
 ```
 
-Save logs to custom folder:
+* Firebase + Google API checks (supply API key):
 
 ```bash
-./fireconx.sh --url https://myapp.firebaseio.com --key AIzaSyABC123def456 --output my_pentest
+./fireconx_v2.5.sh --url https://your-project.firebaseio.com --key AIzaSy...123
 ```
 
-Fast mode (skip slower tests):
+* Custom output folder:
 
 ```bash
-./fireconx.sh --url https://myapp.firebaseio.com --key AIzaSyABC123def456 --fast
-```
-
-Quiet mode (minimal output):
-
-```bash
-./fireconx.sh --url https://myapp.firebaseio.com --key AIzaSyABC123def456 --quiet
-```
-
-Show help:
-
-```bash
-./fireconx.sh --help
+./fireconx_v2.5.sh --url myproject.firebaseio.com --key AIza... --output results_2025
 ```
 
 ---
 
-## 🧠 What FireconX Does
+## What the script does (summary)
 
-* Checks **Firebase database** read/write access
-* Tests **Google APIs** (Maps, Places, Directions, Translate, Vision, etc.)
-* Tests **Firebase services** (Firestore, Auth, FCM)
-* Checks **Firebase Storage** public access
-* Detects if the **API key is restricted or open**
+1. Normalize the given Firebase URL so it always uses `https://` and removes extra slashes.
+2. Probe common Realtime Database paths with `GET` and evaluate responses:
 
----
-
-## 📂 Output Files
-
-FireconX automatically creates a folder like:
-
-```
-firereconx_log_YYYYMMDD_HHMMSS
-```
-
-Inside you’ll find:
-
-* `pentest.log` → full details of each test
-* `summary.txt` → short summary + findings + recommendations
+   * Marks `SECURE` when HTTP returns `401/403` or the response body contains explicit permission/auth errors.
+   * Marks `VULNERABLE` when a `2xx` response includes a non-empty non-null JSON body on `GET`.
+3. Optionally attempts safe write probes (PUT/POST) to detect unauthenticated write permissions.
+4. Probes Firebase Storage public endpoints.
+5. Calls Google Maps endpoints and evaluates the JSON body for API errors (e.g. `REQUEST_DENIED`) even when HTTP `200`.
+6. Checks simple API key restrictions by requesting a test path on several Google services.
+7. Prints colorized output and writes `pentest.log` + `summary.txt` and any saved error JSONs into the output folder.
 
 ---
 
-## 🕵️ Reading Results
+## Output
 
-Look for:
+The script creates an output directory (default: `pentest_YYYYMMDD_HHMMSS`) containing:
 
-* `VULN` or `DATA EXPOSURE` → something exposed
-* `API Key might be usable with:` → key is open
-* `SUCCESS: ... Access denied` → secure
-
----
-
-## ⚙️ Options
-
-| Option     | Description            |
-| ---------- | ---------------------- |
-| `--url`    | Firebase database URL  |
-| `--key`    | Google API key         |
-| `--output` | Custom output folder   |
-| `--fast`   | Skip some tests        |
-| `--quiet`  | Minimal console output |
-| `--help`   | Show help              |
+* `pentest.log` — full colorized log (contains ANSI escapes). If you prefer a plain-log, strip ANSI sequences.
+* `summary.txt` — brief summary of findings.
+* `*_google_error.json` — saved Google API error responses (when applicable).
 
 ---
 
-## 🧩 Troubleshooting
+## Recommended safe options / tips
 
-If you get:
-
-* **Permission denied:**
-  → Run `chmod +x fireconx.sh`
-* **curl: command not found:**
-  → Install curl with `apt`, `yum`, or `brew`
-* **No HTTP status:**
-  → Check network and URL format
+* If you want to avoid write probes, remove or comment the write test lines (`PUT`/`POST`) in the script or request a `--no-write` option if you implement it.
+* Use a controlled environment (staging) or ask for explicit authorization before running against production.
+* If a Google Maps endpoint returns HTTP `200` but `REQUEST_DENIED` in the JSON body, that means the endpoint requires a valid API key and therefore is not publicly usable — the script will mark it as secure and save the body for inspection.
 
 ---
 
-## ⚠️ Legal Reminder
+## Troubleshooting
 
-Use FireconX **only** for apps or systems you own or have permission to test.
-Unauthorized testing may be illegal.
-
----
-
-## ✅ Short example workflow
-
-1. Ensure you have permission.
-2. Make the script executable:
-
-   ```bash
-   chmod +x fireconx.sh
-   ```
-3. Run:
-
-   ```bash
-   ./fireconx.sh --url https://myapp.firebaseio.com --key YOUR_API_KEY
-   ```
-4. Open the generated folder and read `summary.txt` and `pentest.log`.
-5. Report findings and recommended fixes (Firebase Rules, API key restrictions, App Check, auth).
+* `No HTTP response` or status `000` — network, DNS or `curl` timeout issues. You can increase the timeout in the script `do_curl()` function.
+* `Unexpected status 000` for remote hosts — verify that the machine can resolve `maps.googleapis.com` and has outbound HTTPS access.
+* Log file contains ANSI color codes — if you want a plain log, pipe the lines through `sed -r "s/\x1B\[[0-9;]*[A-Za-z]//g"`.
 
 ---
 
-# How results are interpreted — Google API response patterns
+## Contributing
 
-When FireconX tests Google APIs it looks at two things: the **HTTP status code** and the **response body**. Below are common patterns you may see and what they usually mean:
+Pull requests are welcome. Things you could help with:
 
-* **HTTP 200 (OK) with useful JSON** — The API accepted the request and returned real data. If this happens using your API key it means the key is **usable** for that service (possible risk if key should be restricted).
-* **HTTP 200 with an "error" field in JSON** — The endpoint responded but the body contains an error message (e.g., quota exceeded, invalid parameter). We treat this as **not vulnerable** because the call did not return successful data.
-* **HTTP 401 / 403 (Unauthorized / Forbidden)** — The API key is **restricted** or invalid for that service. This is usually good (expected for properly-restricted keys).
-* **HTTP 404 (Not Found)** — The endpoint or resource does not exist (not a vulnerability by itself).
-* **HTTP 429 (Too Many Requests)** — The request was rate-limited. Not a vulnerability, but indicates the service enforces limits.
-* **Other 4xx / 5xx** — Client or server errors. These are treated as **not vulnerable** for data exposure, but may indicate misconfiguration or instability.
-* **Unexpected success on write endpoints (2xx on POST/PUT/PATCH/DELETE)** — Treated as **VULNERABLE**: the key or endpoint allowed changes. These are high-risk and need immediate attention.
+* Add `--no-write` and `--timeout/--retries` CLI flags
+* Add an option to output log files without color codes
+* Integrate with MobSF output to auto-populate targets
 
-**Tip:** FireconX logs the HTTP status and a short sample of the response body (first 500 bytes) so you can quickly verify whether a successful response actually returned sensitive data or just an error message.
+---
+
+## License
+
+MIT License — see LICENSE file if included.

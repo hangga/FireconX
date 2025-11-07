@@ -1,551 +1,335 @@
 #!/bin/bash
+set -euo pipefail
 
-# =============================================
-# MOBILE PENTEST SUPER SCRIPT - ALL IN ONE
-# Firebase + API Key Comprehensive Security Test
-# Complete version with improved vuln detection logic
-# =============================================
+# ==================================================
+#   FIRECONX v2.5 - Mobile Pentest (Google body-check)
+# ==================================================
 
-# Colors for output
+# Colors (ANSI)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Configuration
+# Helpers
+ts() { date "+%Y-%m-%d %H:%M:%S"; }
+
+# Global logfile (set later)
+LOG_FILE=""
+
+# Colored log: prints colored text to terminal and appends same text to logfile.
+log() {
+  local level="$1"
+  local msg="$2"
+  local color="$NC"
+  case "$level" in
+    INFO) color="$BLUE" ;;
+    SUCCESS) color="$GREEN" ;;
+    WARNING) color="$YELLOW" ;;
+    ERROR) color="$RED" ;;
+    VULN) color="$RED" ;;
+    *) color="$NC" ;;
+  esac
+
+  local line="[$(ts)][$level] $msg"
+  # print colored to terminal
+  echo -e "${color}${line}${NC}"
+  # append colored to logfile (if set). If you want logfile without colors, pipe through sed to strip ANSI.
+  if [ -n "${LOG_FILE:-}" ]; then
+    echo -e "${color}${line}${NC}" >> "$LOG_FILE"
+  fi
+}
+
+# Normalize URL: remove scheme then return https://host/path (no duplicate slashes)
+normalize_url() {
+  local url="$1"
+  # trim spaces
+  url="$(echo "$url" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  # strip leading http(s)://
+  url="${url#http://}"
+  url="${url#https://}"
+  # strip leading slashes
+  url="${url#/}"
+  # remove trailing slash
+  url="${url%/}"
+  printf "https://%s" "$url"
+}
+
+# Do a curl request; returns "HTTP|--|BODY"
+# params: url method data timeout
+do_curl() {
+  local url="$1"
+  local method="${2:-GET}"
+  local data="${3:-}"
+  local timeout="${4:-8}"
+
+  local curl_args=(--silent --show-error --max-time "$timeout" --write-out "HTTP_STATUS:%{http_code}")
+
+  if [ "$method" != "GET" ]; then
+    curl_args+=(-X "$method" -H "Content-Type: application/json" -d "$data")
+  fi
+
+  # Attempt once
+  local resp
+  resp="$(curl "${curl_args[@]}" "$url" 2>/dev/null || true)"
+  local code
+  code="$(echo "$resp" | tr -d '\r' | sed -n 's/.*HTTP_STATUS:\([0-9]\{3\}\)$/\1/p' || true)"
+  local body
+  body="$(echo "$resp" | sed -e 's/HTTP_STATUS:[0-9]\{3\}$//' || true)"
+
+  # retry once on empty code
+  if [ -z "$code" ]; then
+    sleep 1
+    resp="$(curl "${curl_args[@]}" "$url" 2>/dev/null || true)"
+    code="$(echo "$resp" | tr -d '\r' | sed -n 's/.*HTTP_STATUS:\([0-9]\{3\}\)$/\1/p' || true)"
+    body="$(echo "$resp" | sed -e 's/HTTP_STATUS:[0-9]\{3\}$//' || true)"
+  fi
+
+  if [ -z "$code" ]; then
+    code="000"
+    body=""
+  fi
+
+  printf "%s|--|%s" "$code" "$body"
+}
+
+# Generic test that handles firebase-like endpoints and stores sample for vuln
+test_http() {
+  local raw_url="$1"
+  local desc="$2"
+  local method="${3:-GET}"
+  local data="${4:-}"
+
+  # Normalize if needed
+  local url
+  if [[ "$raw_url" =~ ^https?:// ]]; then
+    # fix duplicate scheme segments like https:////host
+    url="$(echo "$raw_url" | sed -E 's#(https?://)+#https://#')"
+  else
+    url="$(normalize_url "$raw_url")"
+  fi
+
+  log INFO "Testing $desc -> $url"
+
+  local result
+  result="$(do_curl "$url" "$method" "$data")"
+  local http_code="${result%%|--|*}"
+  local body="${result#*|--|}"
+
+  if [ "$http_code" = "000" ]; then
+    log WARNING "No HTTP response from $url"
+    return 0
+  fi
+
+  local body_lc
+  body_lc="$(echo "$body" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "$http_code" =~ ^2 ]]; then
+    # if google-like error messages inside body, treat accordingly (secure/error)
+    if echo "$body_lc" | grep -qiE '"error_message"|"request_denied"|"error"|"permission"|"denied"|"unauthorized"'; then
+      log SUCCESS "SECURE: $desc (HTTP $http_code with error in body)"
+      # save body for inspection
+      if [ -n "${LOG_FILE:-}" ]; then
+        local fname
+        fname="$(printf "%s/%s_error.json" "$OUTPUT_DIR" "$(echo "$desc" | sed 's/[^a-zA-Z0-9]/_/g')")"
+        echo "$body" > "$fname"
+        log INFO "Saved error body to $fname"
+      fi
+      return 0
+    fi
+
+    if [ "$method" = "GET" ]; then
+      if [ -n "$body" ] && ! echo "$body" | grep -qE '^(null|\{\}|\[\])$'; then
+        log VULN "VULNERABLE: Publicly readable (HTTP $http_code) - $desc"
+        # store sample to logfile
+        if [ -n "${LOG_FILE:-}" ]; then
+          echo "---- Sample: $desc ----" >> "$LOG_FILE"
+          echo "$body" | head -c 800 >> "$LOG_FILE"
+          echo "" >> "$LOG_FILE"
+        fi
+      else
+        log INFO "No data found ($http_code) - $desc"
+      fi
+    else
+      log VULN "VULNERABLE: Write allowed (HTTP $http_code) - $desc"
+    fi
+
+  elif [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+    log SUCCESS "SECURE: $desc (Access denied, HTTP $http_code)"
+  elif [ "$http_code" = "404" ]; then
+    log INFO "Not Found ($http_code) - $desc"
+  else
+    log WARNING "Unexpected status $http_code - $desc"
+  fi
+}
+
+# Specialized test for Google Maps-style endpoints which often return 200 + error payload
+test_google_api() {
+  local endpoint="$1"   # full URL already containing key param or not
+  local desc="$2"
+
+  # ensure https and no duplicate slashes
+  local url
+  if [[ "$endpoint" =~ ^https?:// ]]; then
+    url="$(echo "$endpoint" | sed -E 's#(https?://)+#https://#')"
+  else
+    url="$(normalize_url "$endpoint")"
+  fi
+
+  log INFO "Testing $desc -> $url"
+
+  local result
+  # Use slightly longer timeout for maps
+  result="$(do_curl "$url" "GET" "" 12)"
+  local http_code="${result%%|--|*}"
+  local body="${result#*|--|}"
+
+  if [ "$http_code" = "000" ]; then
+    log WARNING "No HTTP response from $url"
+    return 0
+  fi
+
+  # Check body for Google error info even when HTTP 200
+  if [ "$http_code" = "200" ]; then
+    local body_lc
+    body_lc="$(echo "$body" | tr '[:upper:]' '[:lower:]')"
+    if echo "$body_lc" | grep -qiE '"error_message"|"request_denied"|"status"\s*:\s*"request_denied"'; then
+      log WARNING "SECURE (API error in 200): $desc (HTTP 200 but API error)"
+      # save payload
+      if [ -n "${LOG_FILE:-}" ]; then
+        local fname="$OUTPUT_DIR/$(echo "$desc" | sed 's/[^a-zA-Z0-9]/_/g')_google_error.json"
+        echo "$body" > "$fname"
+        log INFO "Saved Google error body to $fname"
+      fi
+      return 0
+    else
+      log SUCCESS "OPEN: $desc (HTTP 200, no API error found)"
+      # optionally save successful response
+      if [ -n "${LOG_FILE:-}" ]; then
+        local fname="$OUTPUT_DIR/$(echo "$desc" | sed 's/[^a-zA-Z0-9]/_/g')_google_ok.json"
+        echo "$body" > "$fname"
+      fi
+      return 0
+    fi
+  fi
+
+  # If non-200, rely on generic logic
+  if [[ "$http_code" =~ ^(401|403)$ ]]; then
+    log SUCCESS "SECURE: $desc (Access denied, $http_code)"
+  else
+    log WARNING "Unexpected status $http_code - $desc"
+  fi
+}
+
+# Runners
+run_firebase_tests() {
+  local base="$1"
+  test_http "${base}/.json" "Root"
+  test_http "${base}/users.json" "Users"
+  test_http "${base}/messages.json" "Messages"
+  test_http "${base}/orders.json" "Orders"
+  # write tests (PUT/POST)
+  test_http "${base}/pentest_$(date +%s).json" "Write test (PUT)" "PUT" '{"test":"unauthorized_write"}'
+  test_http "${base}/test_collection.json" "POST test" "POST" '{"pentest":true}'
+}
+
+run_storage_tests() {
+  local base="$1"
+  # extract host and project id
+  local host
+  host="$(echo "$base" | sed -E 's#https?://([^/]+).*#\1#')"
+  local proj="${host%.firebaseio.com}"
+  if [ -z "$proj" ]; then
+    log WARNING "Cannot extract project id from $base"
+    return
+  fi
+  local storage_url="https://firebasestorage.googleapis.com/v0/b/${proj}.appspot.com/o"
+  test_http "$storage_url" "Storage Bucket List"
+  test_http "${storage_url}/images%2Ftest.jpg" "Sample Image"
+}
+
+run_maps_tests() {
+  local key="$1"
+  # build endpoints with key param (if key already present in argument endpoint pass full)
+  test_google_api "https://maps.googleapis.com/maps/api/geocode/json?address=Jakarta&key=${key}" "Geocode API"
+  test_google_api "https://maps.googleapis.com/maps/api/place/textsearch/json?query=restaurant&key=${key}" "Places API"
+  test_google_api "https://maps.googleapis.com/maps/api/directions/json?origin=Jakarta&destination=Bandung&key=${key}" "Directions API"
+}
+
+check_key_restrictions() {
+  local key="$1"
+  for svc in maps.googleapis.com places.googleapis.com vision.googleapis.com translation.googleapis.com identitytoolkit.googleapis.com; do
+    local u="https://${svc}/test?key=${key}"
+    local code
+    code="$(curl -s -o /dev/null -w "%{http_code}" "$u" || echo "000")"
+    if [ "$code" = "403" ]; then
+      log SUCCESS "Restricted: ${svc} ($code)"
+    else
+      log VULN "API Key usable with ${svc} ($code)"
+    fi
+  done
+}
+
+# ---------------------------
+# Parse args
 FIREBASE_URL=""
 API_KEY=""
-OUTPUT_DIR=""
-LOG_FILE=""
-USER_AGENT="Mozilla/5.0 (Linux; Android 10; Mobile Pentest) AppleWebKit/537.36"
+OUTPUT_DIR="pentest_$(date +%Y%m%d_%H%M%S)"
 
-# Banner
-show_banner() {
-    echo -e "${CYAN}"
-    echo "=================================================="
-    echo "    MOBILE PENTEST SUPER SCRIPT - ALL IN ONE"
-    echo "    Firebase + API Key Comprehensive Security Test"
-    echo "=================================================="
-    echo -e "${NC}"
+usage() {
+  echo "Usage: $0 --url <firebase_url> [--key <api_key>] [--output <dir>]"
+  exit 1
 }
 
-# Usage information
-show_usage() {
-    echo -e "${YELLOW}Usage:${NC}"
-    echo "  $0 <firebase_url> <api_key>"
-    echo "  $0 --url <firebase_url> --key <api_key> [options]"
-    echo ""
-    echo -e "${YELLOW}Options:${NC}"
-    echo "  --url     Firebase database URL"
-    echo "  --key     Google API key"
-    echo "  --output  Output directory (default: auto-generated)"
-    echo "  --fast    Fast mode (skip some tests)"
-    echo "  --quiet   Quiet mode (minimal output)"
-    echo "  --help    Show this help"
-    echo ""
-    echo -e "${YELLOW}Examples:${NC}"
-    echo "  $0 https://myapp.firebaseio.com AIzaSyABC123def456"
-    echo "  $0 --url https://myapp.firebaseio.com --key AIzaSyABC123def456 --fast"
-    echo "  $0 --url https://myapp.firebaseio.com --key AIzaSyABC123def456 --output my_pentest"
-}
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --url) FIREBASE_URL="$(normalize_url "$2")"; shift 2 ;;
+    --key) API_KEY="$2"; shift 2 ;;
+    --output) OUTPUT_DIR="$2"; shift 2 ;;
+    --help) usage ;;
+    *) echo "Unknown arg: $1"; usage ;;
+  esac
+done
 
-# Initialize setup
-initialize() {
-    # Create output directory
-    if [ -z "$OUTPUT_DIR" ]; then
-        OUTPUT_DIR="firereconx_log_$(date +%Y%m%d_%H%M%S)"
-    fi
-    mkdir -p "$OUTPUT_DIR"
-    
-    LOG_FILE="$OUTPUT_DIR/pentest.log"
-    
-    echo "[+] Initializing Mobile Pentest..." | tee -a "$LOG_FILE"
-    echo "Start Time: $(date)" | tee -a "$LOG_FILE"
-    echo "Firebase URL: $FIREBASE_URL" | tee -a "$LOG_FILE"
-    if [ -n "$API_KEY" ]; then
-        echo "API Key: ${API_KEY:0:10}..." | tee -a "$LOG_FILE"
-    fi
-    echo "Output Directory: $OUTPUT_DIR" | tee -a "$LOG_FILE"
-}
-
-# Logging function
-log() {
-    local level="$1"
-    local message="$2"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    local color="$NC"
-    case $level in
-        "INFO") color=$BLUE ;;
-        "SUCCESS") color=$GREEN ;;
-        "WARNING") color=$YELLOW ;;
-        "ERROR") color=$RED ;;
-        "VULN") color=$RED ;;
-        *) color=$NC ;;
-    esac
-    
-    echo -e "${color}[$timestamp] [$level] $message${NC}" | tee -a "$LOG_FILE"
-}
-
-# Test URL function (improved decision logic, no eval)
-test_endpoint() {
-    local url="$1"
-    local method="$2"
-    local data="$3"
-    local description="$4"
-    local headers_str="$5"
-
-    log "INFO" "Testing: $description"
-    log "INFO" "URL: $url"
-    log "INFO" "Method: $method"
-
-    # Build curl command as array to avoid word-splitting and quoting issues
-    local -a curl_cmd=(curl -s -w "HTTP_STATUS:%{http_code}" -H "User-Agent: $USER_AGENT")
-
-    # Add custom headers (headers_str should be a string with header flags, e.g. -H 'Authorization: key=...')
-    if [ -n "$headers_str" ]; then
-        read -r -a hdrs <<< "$headers_str"
-        for h in "${hdrs[@]}"; do
-            curl_cmd+=("$h")
-        done
-    fi
-
-    local response
-    if [[ "$method" == "GET" ]]; then
-        response=$("${curl_cmd[@]}" "$url" 2>/dev/null)
-    else
-        # For write methods, ensure Content-Type header and method
-        curl_cmd+=( -H "Content-Type: application/json" )
-        curl_cmd+=( -X "$method" )
-        if [ -n "$data" ]; then
-            curl_cmd+=( -d "$data" )
-        fi
-        response=$("${curl_cmd[@]}" "$url" 2>/dev/null)
-    fi
-
-    # Extract HTTP status and body reliably
-    local http_status
-    http_status=$(echo "$response" | tr -d '\r' | sed -n 's/.*HTTP_STATUS:\([0-9]\{3\}\)$/\1/p')
-    local body
-    body=$(echo "$response" | sed -e 's/HTTP_STATUS:[0-9]\{3\}$//')
-
-    if [ -z "$http_status" ]; then
-        log "WARNING" "No HTTP status returned from $url"
-        return 4
-    fi
-
-    log "INFO" "HTTP Status: $http_status"
-
-    # --- Improved vulnerability decision logic ---
-    # Any 2xx is considered a successful response. Distinguish GET (read) vs write methods.
-    if [[ "$http_status" =~ ^2 ]]; then
-        # normalize body (trim whitespace and newlines)
-        local body_trimmed
-        body_trimmed=$(echo "$body" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-
-        # If body looks like an error message (common in some APIs), don't mark as vuln
-        if echo "$body_trimmed" | grep -qiE '"error"|"errorMessage"|"error_description"|"message"|"status"'; then
-            log "INFO" "Received 2xx but body indicates an error-like payload -> not flagged as vulnerable"
-            return 1
-        fi
-
-        if [ "$method" = "GET" ]; then
-            # GET: vulnerable only if body contains meaningful content (not null/{} or [])
-            if [ -n "$body_trimmed" ] && ! echo "$body_trimmed" | grep -qE '^null$|^\{\s*\}$|^\[\s*\]$'; then
-                log "VULN" "VULNERABLE: $description - Publicly readable (HTTP $http_status)"
-                echo "Data: $(echo "$body" | head -c 500)" | tee -a "$LOG_FILE"
-                return 0
-            else
-                log "INFO" "HTTP $http_status but response body empty/null -> likely not exposed"
-                return 2
-            fi
-        else
-            # For write methods (PUT/POST/PATCH/DELETE) any 2xx typically means write succeeded -> vuln
-            log "VULN" "VULNERABLE: $description - Write allowed (HTTP $http_status)"
-            if [ -n "$body_trimmed" ] && ! echo "$body_trimmed" | grep -qE '^null$|^\{\s*\}$|^\[\s*\]$'; then
-                echo "Response: $(echo "$body" | head -c 500)" | tee -a "$LOG_FILE"
-            fi
-            return 0
-        fi
-    fi
-
-    # Handle common non-2xx statuses
-    if [ "$http_status" = "401" ] || [ "$http_status" = "403" ]; then
-        log "SUCCESS" "SECURE: $description - Access denied (HTTP $http_status)"
-        return 1
-    elif [ "$http_status" = "404" ]; then
-        log "INFO" "NOT FOUND: $description"
-        return 2
-    elif [ "$http_status" = "429" ]; then
-        log "WARNING" "RATE LIMITED: $description"
-        return 3
-    else
-        log "WARNING" "UNKNOWN: $description - Status $http_status"
-        return 4
-    fi
-}
-
-# =============================================
-# FIREBASE DATABASE SECURITY TEST
-# =============================================
-
-test_firebase_security() {
-    log "INFO" "Starting Firebase Database Security Tests"
-
-    local firebase_tests=(
-        # method::url::data::description (data empty if not applicable)
-        "GET::${FIREBASE_URL}/.json::::Root database access"
-        "GET::${FIREBASE_URL}/users.json::::Users collection access"
-        "GET::${FIREBASE_URL}/user.json::::User data access"
-        "GET::${FIREBASE_URL}/profiles.json::::Profiles data access"
-        
-        # Mobile app specific collections
-        "GET::${FIREBASE_URL}/tokens.json::::FCM Tokens"
-        "GET::${FIREBASE_URL}/devices.json::::Device information"
-        "GET::${FIREBASE_URL}/sessions.json::::User sessions"
-        "GET::${FIREBASE_URL}/app.json::::App configuration"
-        "GET::${FIREBASE_URL}/config.json::::General configuration"
-        "GET::${FIREBASE_URL}/settings.json::::App settings"
-        
-        # Common mobile app data structures
-        "GET::${FIREBASE_URL}/posts.json::::Posts/Content data"
-        "GET::${FIREBASE_URL}/messages.json::::Chat messages"
-        "GET::${FIREBASE_URL}/conversations.json::::Conversations"
-        "GET::${FIREBASE_URL}/notifications.json::::Notifications"
-        "GET::${FIREBASE_URL}/orders.json::::E-commerce orders"
-        "GET::${FIREBASE_URL}/products.json::::Products data"
-        "GET::${FIREBASE_URL}/payments.json::::Payment information"
-        "GET::${FIREBASE_URL}/transactions.json::::Transactions"
-        
-        # Write operations (provide JSON payloads)
-        "PUT::${FIREBASE_URL}/pentest_$(date +%s).json::{\"test\":\"unauthorized_write\",\"timestamp\":\"$(date)\",\"source\":\"mobile_pentest\"}::Write permission test"
-        "POST::${FIREBASE_URL}/test_collection.json::{\"pentest\":true,\"mobile_app\":\"security_test\",\"timestamp\":\"$(date)\"}::POST data creation"
-    )
-
-    for t in "${firebase_tests[@]}"; do
-        IFS='::' read -r method url data description <<< "$t"
-        test_endpoint "$url" "$method" "$data" "$description"
-        sleep 0.5
-    done
-}
-
-# =============================================
-# GOOGLE MAPS APIS TEST
-# =============================================
-
-test_google_maps_apis() {
-    log "INFO" "Starting Google Maps APIs Tests"
-    
-    local maps_tests=(
-        "https://maps.googleapis.com/maps/api/geocode/json?address=Jakarta&key=$API_KEY::Geocoding API"
-        "https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=-6.2,106.8&radius=1000&key=$API_KEY::Places Nearby Search"
-        "https://maps.googleapis.com/maps/api/place/textsearch/json?query=restaurant&key=$API_KEY::Places Text Search"
-        "https://maps.googleapis.com/maps/api/place/autocomplete/json?input=pizza&key=$API_KEY::Places Autocomplete"
-        "https://maps.googleapis.com/maps/api/directions/json?origin=Jakarta&destination=Bandung&key=$API_KEY::Directions API"
-        "https://maps.googleapis.com/maps/api/geolocation/v1/geolocate?key=$API_KEY::Geolocation API"
-    )
-
-    for test in "${maps_tests[@]}"; do
-        IFS='::' read -r url description <<< "$test"
-        test_endpoint "$url" "GET" "" "$description"
-        sleep 0.3
-    done
-}
-
-# =============================================
-# FIREBASE SERVICES TEST
-# =============================================
-
-test_firebase_services() {
-    log "INFO" "Starting Firebase Services Tests"
-    
-    local firebase_api_tests=(
-        "https://firestore.googleapis.com/v1/projects/test/databases/(default)/documents::Firestore API"
-        "https://fcm.googleapis.com/fcm/send::FCM Send Endpoint"
-        "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=$API_KEY::Firebase Auth"
-        "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=$API_KEY::Firebase Auth SignUp"
-    )
-
-    for test in "${firebase_api_tests[@]}"; do
-        IFS='::' read -r url description <<< "$test"
-        test_endpoint "$url" "GET" "" "$description"
-    done
-    
-    # FCM Test with POST (will attempt to send to /topics/all)
-    local fcm_data='{
-      "to": "/topics/all",
-      "notification": {
-        "title": "Pentest Notification",
-        "body": "Security test message",
-        "click_action": "OPEN_APP"
-      }
-    }'
-    test_endpoint "https://fcm.googleapis.com/fcm/send" "POST" "$fcm_data" "FCM Push Notification" "-H Authorization:key=$API_KEY"
-}
-
-# =============================================
-# GOOGLE ML APIS TEST
-# =============================================
-
-test_google_ml_apis() {
-    log "INFO" "Starting Google Machine Learning APIs Tests"
-    
-    local ml_tests=(
-        "https://vision.googleapis.com/v1/images:annotate?key=$API_KEY::Vision API"
-        "https://language.googleapis.com/v1/documents/analyzeEntities?key=$API_KEY::Natural Language Entities"
-        "https://translation.googleapis.com/language/translate/v2?q=hello&target=id&key=$API_KEY::Translate API"
-        "https://speech.googleapis.com/v1/speech:recognize?key=$API_KEY::Speech-to-Text::Speech-to-Text"
-    )
-
-    for test in "${ml_tests[@]}"; do
-        IFS='::' read -r url description <<< "$test"
-        test_endpoint "$url" "GET" "" "$description"
-    done
-}
-
-# =============================================
-# FIREBASE STORAGE TEST
-# =============================================
-
-test_firebase_storage() {
-    log "INFO" "Starting Firebase Storage Tests"
-    
-    # Extract project ID from Firebase URL
-    local project_id
-    project_id=$(echo "$FIREBASE_URL" | sed -E 's|https?://([^/]+).*|\1|' | sed 's|.firebaseio.com||')
-    
-    if [ -n "$project_id" ]; then
-        local storage_tests=(
-            "GET::https://firebasestorage.googleapis.com/v0/b/${project_id}.appspot.com/o::Storage bucket list"
-            "GET::https://firebasestorage.googleapis.com/v0/b/${project_id}.appspot.com/o/users%2Ftest.jpg::User file access"
-            "GET::https://firebasestorage.googleapis.com/v0/b/${project_id}.appspot.com/o/images%2Fprofile.jpg::Profile images access"
-        )
-
-        for test in "${storage_tests[@]}"; do
-            IFS='::' read -r method url description <<< "$test"
-            test_endpoint "$url" "$method" "" "$description"
-        done
-    else
-        log "WARNING" "Could not extract project ID from FIREBASE_URL"
-    fi
-}
-
-# =============================================
-# API KEY RESTRICTIONS CHECK
-# =============================================
-
-check_api_restrictions() {
-    log "INFO" "Checking API Key Restrictions"
-    
-    local services=(
-        "maps.googleapis.com"
-        "places.googleapis.com"
-        "geolocation.googleapis.com"
-        "vision.googleapis.com"
-        "language.googleapis.com"
-        "translation.googleapis.com"
-        "identitytoolkit.googleapis.com"
-    )
-
-    for service in "${services[@]}"; do
-        local test_url="https://${service}/test?key=${API_KEY}"
-        # Use curl to only fetch status code
-        local http_code
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" "$test_url")
-        if [ "$http_code" != "403" ] && [ "$http_code" != "401" ]; then
-            log "VULN" "API Key might be usable with: $service (HTTP $http_code)"
-        else
-            log "SUCCESS" "API Key restricted for: $service"
-        fi
-    done
-}
-
-# =============================================
-# MOBILE FIREBASE PATHS CHECK
-# =============================================
-
-check_mobile_firebase_paths() {
-    log "INFO" "Checking Mobile-Specific Firebase Paths"
-    
-    local mobile_paths=(
-        "/users"
-        "/tokens"
-        "/devices"
-        "/sessions"
-        "/profiles"
-        "/settings"
-        "/config"
-        "/notifications"
-        "/messages"
-        "/posts"
-        "/orders"
-        "/payments"
-        "/products"
-    )
-
-    for path in "${mobile_paths[@]}"; do
-        local url="${FIREBASE_URL}${path}.json"
-        local resp
-        resp=$(curl -s -w "HTTP_STATUS:%{http_code}" "$url")
-        local http_code
-        http_code=$(echo "$resp" | tr -d '\r' | sed -n 's/.*HTTP_STATUS:\([0-9]\{3\}\)$/\1/p')
-        local body
-        body=$(echo "$resp" | sed -e 's/HTTP_STATUS:[0-9]\{3\}$//')
-        
-        if [ "$http_code" = "200" ] && [ -n "$body" ] && [ "$body" != "null" ]; then
-            log "VULN" "DATA EXPOSURE: $path is publicly readable"
-            echo "Sample: $(echo "$body" | head -c 200)" | tee -a "$LOG_FILE"
-        fi
-    done
-}
-
-# =============================================
-# MAIN EXECUTION FUNCTION
-# =============================================
-
-run_comprehensive_pentest() {
-    log "INFO" "Starting Comprehensive Mobile App Pentest"
-    
-    test_firebase_security
-    test_google_maps_apis
-    test_firebase_services
-    test_google_ml_apis
-    test_firebase_storage
-    check_api_restrictions
-    check_mobile_firebase_paths
-    
-    log "INFO" "Comprehensive pentest completed"
-}
-
-# =============================================
-# RESULTS SUMMARY
-# =============================================
-
-generate_summary() {
-    log "INFO" "Generating Pentest Summary"
-    
-    local summary_file="$OUTPUT_DIR/summary.txt"
-    
-    echo "MOBILE PENTEST SUMMARY" > "$summary_file"
-    echo "======================" >> "$summary_file"
-    echo "Date: $(date)" >> "$summary_file"
-    echo "Target: $FIREBASE_URL" >> "$summary_file"
-    echo "" >> "$summary_file"
-    
-    # Count vulnerabilities (best-effort)
-    local firebase_vulns
-    firebase_vulns=$(grep -c "VULNERABLE\|DATA EXPOSURE" "$LOG_FILE" || true)
-    local api_vulns
-    api_vulns=$(grep -c "API Key might be usable\|API Key.*VULNERABLE" "$LOG_FILE" || true)
-    local total_vulns=$((firebase_vulns + api_vulns))
-    
-    echo "VULNERABILITY SUMMARY" >> "$summary_file"
-    echo "====================" >> "$summary_file"
-    echo "Total Vulnerabilities: $total_vulns" >> "$summary_file"
-    echo "Firebase Issues: $firebase_vulns" >> "$summary_file"
-    echo "API Key Issues: $api_vulns" >> "$summary_file"
-    echo "" >> "$summary_file"
-    
-    echo "DETAILED FINDINGS" >> "$summary_file"
-    echo "=================" >> "$summary_file"
-    grep -n "VULNERABLE\|DATA EXPOSURE\|might be usable" "$LOG_FILE" >> "$summary_file" || true
-    
-    echo "" >> "$summary_file"
-    echo "SECURITY RECOMMENDATIONS" >> "$summary_file"
-    echo "========================" >> "$summary_file"
-    echo "1. Implement Firebase Security Rules" >> "$summary_file"
-    echo "2. Restrict API Keys to specific services & domains" >> "$summary_file"
-    echo "3. Use App Check for additional protection" >> "$summary_file"
-    echo "4. Implement proper authentication" >> "$summary_file"
-    echo "5. Regular security audits" >> "$summary_file"
-    
-    log "SUCCESS" "Summary generated: $summary_file"
-    
-    echo -e "\n${GREEN}=== PENTEST COMPLETED ===${NC}"
-    echo -e "Total vulnerabilities found: ${RED}$total_vulns${NC}"
-    echo -e "Firebase issues: ${YELLOW}$firebase_vulns${NC}"
-    echo -e "API key issues: ${YELLOW}$api_vulns${NC}"
-    echo -e "Full results: ${CYAN}$OUTPUT_DIR/${NC}"
-    echo -e "Summary: ${CYAN}$summary_file${NC}"
-}
-
-# =============================================
-# ARGUMENT PARSING
-# =============================================
-
-parse_arguments() {
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --url)
-                FIREBASE_URL="$2"
-                shift 2
-                ;;
-            --key)
-                API_KEY="$2"
-                shift 2
-                ;;
-            --output)
-                OUTPUT_DIR="$2"
-                shift 2
-                ;;
-            --fast)
-                FAST_MODE=true
-                shift
-                ;;
-            --quiet)
-                QUIET_MODE=true
-                shift
-                ;;
-            --help)
-                show_usage
-                exit 0
-                ;;
-            *)
-                # Positional arguments
-                if [ -z "$FIREBASE_URL" ]; then
-                    FIREBASE_URL="$1"
-                elif [ -z "$API_KEY" ]; then
-                    API_KEY="$1"
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    # Validate required arguments
-    if [ -z "$FIREBASE_URL" ] || [ -z "$API_KEY" ]; then
-        echo -e "${RED}Error: Firebase URL and API Key are required${NC}"
-        show_usage
-        exit 1
-    fi
-}
-
-# =============================================
-# MAIN EXECUTION
-# =============================================
-
-main() {
-    show_banner
-    
-    # Parse command line arguments
-    parse_arguments "$@"
-    
-    # Initialize setup
-    initialize
-    
-    # Run comprehensive pentest
-    run_comprehensive_pentest
-    
-    # Generate summary
-    generate_summary
-    
-    log "SUCCESS" "Mobile pentest completed successfully!"
-}
-
-# Check if script is being sourced or executed
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
+if [ -z "${FIREBASE_URL:-}" ]; then
+  usage
 fi
+
+mkdir -p "$OUTPUT_DIR"
+LOG_FILE="$OUTPUT_DIR/pentest.log"
+
+log INFO "Initialized. Output dir: $OUTPUT_DIR"
+log INFO "Firebase URL: $FIREBASE_URL"
+if [ -n "${API_KEY:-}" ]; then
+  log INFO "API Key: ${API_KEY:0:10}..."
+else
+  log WARNING "No API key provided; skipping Google API tests."
+fi
+
+# Run tests
+run_firebase_tests "$FIREBASE_URL"
+run_storage_tests "$FIREBASE_URL"
+
+if [ -n "${API_KEY:-}" ]; then
+  run_maps_tests "$API_KEY"
+  check_key_restrictions "$API_KEY"
+fi
+
+# summary
+log INFO "Generating summary..."
+{
+  echo "MOBILE PENTEST SUMMARY ($(date))"
+  echo "Target: $FIREBASE_URL"
+  echo "----------------------------------"
+  echo "Vulnerable: $(grep -c 'VULNERABLE' "$LOG_FILE" || true)"
+  echo "Secure: $(grep -c 'SECURE' "$LOG_FILE" || true)"
+  echo "Warnings: $(grep -c 'WARNING' "$LOG_FILE" || true)"
+  echo "----------------------------------"
+  echo "Details:"
+  grep -E 'VULNERABLE|SECURE|WARNING' "$LOG_FILE" || true
+} > "$OUTPUT_DIR/summary.txt"
+
+log SUCCESS "Pentest completed. Summary at $OUTPUT_DIR/summary.txt"
+exit 0
