@@ -367,40 +367,151 @@ check_api_restrictions() {
 # MOBILE FIREBASE PATHS CHECK
 # =============================================
 
+# check_mobile_firebase_paths() {
+#     log "INFO" "Checking Mobile-Specific Firebase Paths"
+    
+#     local mobile_paths=(
+#         "/users"
+#         "/tokens"
+#         "/devices"
+#         "/sessions"
+#         "/profiles"
+#         "/settings"
+#         "/config"
+#         "/notifications"
+#         "/messages"
+#         "/posts"
+#         "/orders"
+#         "/payments"
+#         "/products"
+#     )
+
+#     for path in "${mobile_paths[@]}"; do
+#         local url="${FIREBASE_URL}${path}.json"
+#         local resp
+#         resp=$(curl -s -w "HTTP_STATUS:%{http_code}" "$url")
+#         local http_code
+#         http_code=$(echo "$resp" | tr -d '\r' | sed -n 's/.*HTTP_STATUS:\([0-9]\{3\}\)$/\1/p')
+#         local body
+#         body=$(echo "$resp" | sed -e 's/HTTP_STATUS:[0-9]\{3\}$//')
+        
+#         if [ "$http_code" = "200" ] && [ -n "$body" ] && [ "$body" != "null" ]; then
+#             log "VULN" "DATA EXPOSURE: $path is publicly readable"
+#             echo "Sample: $(echo "$body" | head -c 200)" | tee -a "$LOG_FILE"
+#         fi
+#     done
+# }
+
 check_mobile_firebase_paths() {
     log "INFO" "Checking Mobile-Specific Firebase Paths"
-    
+
+    # Pastikan FIREBASE_URL sudah diset
+    if [ -z "$FIREBASE_URL" ]; then
+        log "ERROR" "FIREBASE_URL is not set. Example: export FIREBASE_URL='https://your-app.firebaseio.com'"
+        return 1
+    fi
+
+    # Normalisasi URL (tambahkan https:// jika tidak ada)
+    local base
+    case "$FIREBASE_URL" in
+        http://*|https://*)
+            base="$FIREBASE_URL"
+            ;;
+        //*)
+            base="https:${FIREBASE_URL}"
+            ;;
+        *)
+            base="https://${FIREBASE_URL}"
+            ;;
+    esac
+
+    # Hapus slash ganda, pastikan ada satu slash di akhir
+    base="${base%/}/"
+
+    # Daftar path umum di aplikasi mobile
     local mobile_paths=(
-        "/users"
-        "/tokens"
-        "/devices"
-        "/sessions"
-        "/profiles"
-        "/settings"
-        "/config"
-        "/notifications"
-        "/messages"
-        "/posts"
-        "/orders"
-        "/payments"
-        "/products"
+        "users"
+        "user"
+        "tokens"
+        "devices"
+        "sessions"
+        "profiles"
+        "settings"
+        "config"
+        "notifications"
+        "messages"
+        "posts"
+        "orders"
+        "payments"
+        "products"
+        "transactions"
     )
 
+    # Loop setiap path
     for path in "${mobile_paths[@]}"; do
-        local url="${FIREBASE_URL}${path}.json"
-        local resp
-        resp=$(curl -s -w "HTTP_STATUS:%{http_code}" "$url")
-        local http_code
+        local url="${base}${path}.json"
+        log "INFO" "Testing: ${url} :::: ${path}"
+        log "INFO" "Method: GET"
+
+        # Jalankan curl dan ambil body + status code
+        local resp http_code body
+        resp=$(curl -sS --max-time 6 -A "Mozilla/5.0 (PentestBot)" -w "HTTP_STATUS:%{http_code}" "$url" 2>/dev/null)
         http_code=$(echo "$resp" | tr -d '\r' | sed -n 's/.*HTTP_STATUS:\([0-9]\{3\}\)$/\1/p')
-        local body
-        body=$(echo "$resp" | sed -e 's/HTTP_STATUS:[0-9]\{3\}$//')
-        
-        if [ "$http_code" = "200" ] && [ -n "$body" ] && [ "$body" != "null" ]; then
-            log "VULN" "DATA EXPOSURE: $path is publicly readable"
-            echo "Sample: $(echo "$body" | head -c 200)" | tee -a "$LOG_FILE"
+        body=$(echo "$resp" | sed -e 's/HTTP_STATUS:[0-9]\{3\}$//' | tr -d '\n' | xargs || true)
+
+        # Validasi hasil
+        if [ -z "$http_code" ]; then
+            log "WARNING" "No HTTP status returned from $url"
+            continue
         fi
+
+        case "$http_code" in
+            200)
+                if [ -n "$body" ] && [ "$body" != "null" ] && [ "$body" != "{}" ]; then
+                    log "VULN" "DATA EXPOSURE: $path is publicly readable"
+                    echo "Sample: $(echo "$body" | head -c 200)" | tee -a "$LOG_FILE"
+                else
+                    log "SAFE" "No public data at $path ($http_code)"
+                fi
+                ;;
+            401|403)
+                log "INFO" "Protected: $path requires auth ($http_code)"
+                ;;
+            404)
+                log "INFO" "Not found: $path ($http_code)"
+                ;;
+            *)
+                log "INFO" "Unexpected response ($http_code) at $path"
+                ;;
+        esac
     done
+
+    # Tes tulis (write test)
+    local timestamp=$(date)
+    local test_put_url="${base}pentest_$(date +%s).json"
+    local test_post_url="${base}test_collection.json"
+    local put_data="{\"test\":\"unauthorized_write\",\"timestamp\":\"${timestamp}\",\"source\":\"mobile_pentest\"}"
+    local post_data="{\"pentest\":true,\"mobile_app\":\"security_test\",\"timestamp\":\"${timestamp}\"}"
+
+    log "INFO" "Testing WRITE permission via PUT to $test_put_url"
+    local put_resp=$(curl -sS -X PUT -H "Content-Type: application/json" -d "$put_data" -w "HTTP_STATUS:%{http_code}" "$test_put_url" 2>/dev/null)
+    local put_code=$(echo "$put_resp" | tr -d '\r' | sed -n 's/.*HTTP_STATUS:\([0-9]\{3\}\)$/\1/p')
+    if [ "$put_code" = "200" ]; then
+        log "VULN" "WRITE PERMISSION: Able to PUT data without auth ($put_code)"
+    else
+        log "INFO" "PUT test denied ($put_code)"
+    fi
+
+    log "INFO" "Testing WRITE permission via POST to $test_post_url"
+    local post_resp=$(curl -sS -X POST -H "Content-Type: application/json" -d "$post_data" -w "HTTP_STATUS:%{http_code}" "$test_post_url" 2>/dev/null)
+    local post_code=$(echo "$post_resp" | tr -d '\r' | sed -n 's/.*HTTP_STATUS:\([0-9]\{3\}\)$/\1/p')
+    if [ "$post_code" = "200" ]; then
+        log "VULN" "WRITE PERMISSION: Able to POST data without auth ($post_code)"
+    else
+        log "INFO" "POST test denied ($post_code)"
+    fi
 }
+
 
 # =============================================
 # MAIN EXECUTION FUNCTION
