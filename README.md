@@ -56,13 +56,13 @@ Then run it as described below.
 * Firebase + Google API checks (supply API key):
 
 ```bash
-./fireconx_v2.5.sh --url https://your-project.firebaseio.com --key AIzaSy...123
+./fireconx.sh --url https://your-project.firebaseio.com --key AIzaSy...123
 ```
 
 * Custom output folder:
 
 ```bash
-./fireconx_v2.5.sh --url myproject.firebaseio.com --key AIza... --output results_2025
+./fireconx.sh --url myproject.firebaseio.com --key AIza... --output results_2025
 ```
 
 ---
