@@ -47,12 +47,6 @@ Then run it as described below.
 
 ### Examples
 
-* Basic Firebase-only scan (scheme optional):
-
-```bash
-./fireconx.sh --url your-project.firebaseio.com
-```
-
 * Firebase + Google API checks (supply API key):
 
 ```bash
